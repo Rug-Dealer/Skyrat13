@@ -4,7 +4,7 @@
 	id = "jelly"
 	default_color = "00FF90"
 	say_mod = "chirps"
-	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR,WINGCOLOR)
+	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR,WINGCOLOR,CAN_SCAR,HAS_SKIN,HAS_FLESH)
 	mutantlungs = /obj/item/organ/lungs/slime
 	mutant_heart = /obj/item/organ/heart/slime
 	mutant_bodyparts = list("mcolor" = "FFF", "mam_tail" = "None", "mam_ears" = "None", "mam_snouts" = "None", "taur" = "None", "deco_wings" = "None")
@@ -13,7 +13,7 @@
 	gib_types = list(/obj/effect/gibspawner/slime, /obj/effect/gibspawner/slime/bodypartless)
 	exotic_blood = /datum/reagent/blood/jellyblood
 	exotic_bloodtype = "GEL"
-	exotic_blood_color = "BLOOD_COLOR_SLIME"
+	exotic_blood_color = BLOOD_COLOR_SLIME
 	damage_overlay_type = ""
 	var/datum/action/innate/regenerate_limbs/regenerate_limbs
 	var/datum/action/innate/slime_change/slime_change	//CIT CHANGE
@@ -22,8 +22,20 @@
 	coldmod = 6   // = 3x cold damage
 	heatmod = 0.5 // = 1/4x heat damage
 	burnmod = 0.5 // = 1/2x generic burn damage
-	languagewhitelist = list("Slime") //Skyrat change - species language whitelist
+	//Skyrat change
+	languagewhitelist = list("Slime")
+	bloodreagents = list("Synthetic Blood", "Slime Jelly Blood")
+	bloodtypes = list("A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "GEL")
+	rainbowblood = TRUE
+	//
 	species_language_holder = /datum/language_holder/jelly
+	mutant_brain = /obj/item/organ/brain/jelly
+
+/obj/item/organ/brain/jelly
+	name = "slime nucleus"
+	desc = "A slimey membranous mass from a slime person"
+	icon_state = "brain-slime"
+
 
 /datum/species/jelly/on_species_loss(mob/living/carbon/C)
 	if(regenerate_limbs)
@@ -160,7 +172,7 @@
 	name = "Xenobiological Slime Entity"
 	id = "slime"
 	default_color = "00FFFF"
-	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR)
+	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR,CAN_SCAR,HAS_SKIN,HAS_FLESH)
 	say_mod = "says"
 	hair_color = "mutcolor"
 	hair_alpha = 150
@@ -248,7 +260,7 @@
 		"<span class='notice'>You focus intently on moving your body while \
 		standing perfectly still...</span>")
 
-	H.notransform = TRUE
+	H.mob_transforming = TRUE
 
 	if(do_after(owner, delay=60, needhand=FALSE, target=owner, progress=TRUE))
 		if(H.blood_volume >= BLOOD_VOLUME_SLIME_SPLIT)
@@ -258,7 +270,7 @@
 	else
 		to_chat(H, "<span class='warning'>...but fail to stand perfectly still!</span>")
 
-	H.notransform = FALSE
+	H.mob_transforming = FALSE
 
 /datum/action/innate/split_body/proc/make_dupe()
 	var/mob/living/carbon/human/H = owner
@@ -276,7 +288,7 @@
 	spare.Move(get_step(H.loc, pick(NORTH,SOUTH,EAST,WEST)))
 
 	H.blood_volume *= 0.45
-	H.notransform = 0
+	H.mob_transforming = 0
 
 	var/datum/species/jelly/slime/origin_datum = H.dna.species
 	origin_datum.bodies |= spare
@@ -437,7 +449,7 @@
 	id = "slimeperson"
 	limbs_id = "slime"
 	default_color = "00FFFF"
-	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR)
+	species_traits = list(MUTCOLORS,EYECOLOR,HAIR,FACEHAIR,CAN_SCAR,HAS_SKIN,HAS_FLESH)
 	inherent_traits = list(TRAIT_TOXINLOVER)
 	mutant_bodyparts = list("mcolor" = "FFF", "mcolor2" = "FFF","mcolor3" = "FFF", "mam_tail" = "None", "mam_ears" = "None", "mam_body_markings" = "Plain", "mam_snouts" = "None", "taur" = "None")
 	say_mod = "says"
@@ -621,9 +633,19 @@
 			qdel(X)
 		var/min_D = CONFIG_GET(number/penis_min_inches_prefs)
 		var/max_D = CONFIG_GET(number/penis_max_inches_prefs)
-		var/new_length = input(owner, "Penis length in inches:\n([min_D]-[max_D])", "Genital Alteration") as num|null
-		if(new_length)
-			H.dna.features["cock_length"] = clamp(round(new_length), min_D, max_D)
+		//Skyrat edit
+		var/min_D_m = round(min_D * 2.54, 1)
+		var/max_D_m = round(max_D * 2.54, 1)
+		var/new_length
+		if(owner?.client?.prefs?.toggles & METRIC_OR_BUST)
+			new_length = input(owner, "Penis length in inches:\n([min_D_m]-[max_D_m])", "Genital Alteration") as num|null
+			if(new_length)
+				H.dna.features["cock_length"] = clamp(round(new_length/2.54, 0.1), min_D, max_D)
+		else
+			new_length = input(owner, "Penis length in inches:\n([min_D]-[max_D])", "Genital Alteration") as num|null
+			if(new_length)
+				H.dna.features["cock_length"] = clamp(round(new_length, 0.1), min_D, max_D)
+		//Skyrat edit end
 		H.update_genitals()
 		H.apply_overlay()
 		H.give_genital(/obj/item/organ/genital/testicles)

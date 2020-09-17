@@ -63,6 +63,7 @@
 	//SKYRAT EDIT - ATMS
 	new /obj/item/card/id/departmental_budget/sec(src)
 	//SKYRAT EDIT END
+	new /obj/item/clothing/suit/space/hardsuit/security_armor/hos(src)
 	new /obj/item/clothing/neck/cloak/hos(src)
 	new /obj/item/cartridge/hos(src)
 	new /obj/item/radio/headset/heads/hos(src)
@@ -118,6 +119,17 @@
 	//new /obj/item/gun/ballistic/shotgun/automatic/combat/compact(src) | SKYRAT CHANGE, REMOVES COMPACT SHOTGUN
 	new /obj/item/clothing/head/beret/sec/corporatewarden(src)
 /obj/structure/closet/secure_closet/security
+	name = "security officer's locker"
+	req_access = list(ACCESS_SECURITY)
+	icon_state = "sec"
+/obj/structure/closet/secure_closet/security/PopulateContents()
+	..()
+	new /obj/item/clothing/suit/space/hardsuit/security_armor(src)
+	new /obj/item/radio/headset/headset_sec(src)
+	new /obj/item/radio/headset/headset_sec/alt(src)
+	new /obj/item/clothing/glasses/hud/security/sunglasses(src)
+	new /obj/item/flashlight/seclite(src)
+/obj/structure/closet/secure_closet/security_xenoarch
 	name = "security officer's locker"
 	req_access = list(ACCESS_SECURITY)
 	icon_state = "sec"
@@ -283,8 +295,8 @@
 	icon_state = "tac"
 /obj/structure/closet/secure_closet/lethalshots/PopulateContents()
 	..()
-	new /obj/item/twohanded/electrostaff(src)
-	new /obj/item/twohanded/electrostaff(src)
+	new /obj/item/electrostaff(src)
+	new /obj/item/electrostaff(src)
 	for(var/i in 1 to 3)
 		new /obj/item/storage/box/lethalshot(src)
 

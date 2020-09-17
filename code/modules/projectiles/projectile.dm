@@ -49,7 +49,7 @@
 	var/pixel_move_interrupted = FALSE
 
 	/// Pixels moved per second.
-	var/pixels_per_second = TILES_TO_PIXELS(12.5)
+	var/pixels_per_second = TILES_TO_PIXELS(17.5)
 	/// The number of pixels we increment by. THIS IS NOT SPEED, DO NOT TOUCH THIS UNLESS YOU KNOW WHAT YOU ARE DOING. In general, lower values means more linetrace accuracy up to a point at cost of performance.
 	var/pixel_increment_amount
 
@@ -58,9 +58,35 @@
 	var/nondirectional_sprite = FALSE //Set TRUE to prevent projectiles from having their sprites rotated based on firing angle
 	var/spread = 0			//amount (in degrees) of projectile spread
 	animate_movement = 0	//Use SLIDE_STEPS in conjunction with legacy
+	/// how many times we've ricochet'd so far (instance variable, not a stat)
 	var/ricochets = 0
-	var/ricochets_max = 2
-	var/ricochet_chance = 30
+	/// how many times we can ricochet max
+	var/ricochets_max = 0
+	/// 0-100, the base chance of ricocheting, before being modified by the atom we shoot and our chance decay
+	var/ricochet_chance = 0
+	/// 0-1 (or more, I guess) multiplier, the ricochet_chance is modified by multiplying this after each ricochet
+	var/ricochet_decay_chance = 0.7
+	/// 0-1 (or more, I guess) multiplier, the projectile's damage is modified by multiplying this after each ricochet
+	var/ricochet_decay_damage = 0.7
+	/// On ricochet, if nonzero, we consider all mobs within this range of our projectile at the time of ricochet to home in on like Revolver Ocelot, as governed by ricochet_auto_aim_angle
+	var/ricochet_auto_aim_range = 0
+	/// On ricochet, if ricochet_auto_aim_range is nonzero, we'll consider any mobs within this range of the normal angle of incidence to home in on, higher = more auto aim
+	var/ricochet_auto_aim_angle = 30
+	/// the angle of impact must be within this many degrees of the struck surface, set to 0 to allow any angle
+	var/ricochet_incidence_leeway = 40
+	///If we have a shrapnel_type defined, these embedding stats will be passed to the spawned shrapnel type, which will roll for embedding on the target
+	embedding = null
+	///Can't wound by default
+	wound_bonus = CANT_WOUND
+	///For what kind of brute wounds we're rolling for, if we're doing such a thing. Lasers obviously don't care since they do burn instead.
+	sharpness = SHARP_NONE
+	///How much we want to drop both wound_bonus and bare_wound_bonus (to a minimum of 0 for the latter) per tile, for falloff purposes
+	var/wound_falloff_tile
+	///How much we want to drop the embed_chance value, if we can embed, per tile, for falloff purposes
+	var/embed_falloff_tile
+
+	///If the object being hit can pass ths damage on to something else, it should not do it for this bullet
+	var/force_hit = FALSE
 
 	//Hitscan
 	var/hitscan = FALSE		//Whether this is hitscan. If it is, speed is basically ignored.
@@ -131,7 +157,12 @@
 	var/impact_effect_type //what type of impact effect to show when hitting something
 	var/log_override = FALSE //is this type spammed enough to not log? (KAs)
 
-	var/temporary_unstoppable_movement = FALSE
+	var/temporary_unstoppable_movement = FALSE //fuck the laws of thermodynamics
+
+	///If defined, on hit we create an item of this type then call hitby() on the hit target with this
+	var/shrapnel_type
+	///If TRUE, hit mobs even if they're on the floor and not our target
+	var/hit_stunned_targets = FALSE
 
 /obj/item/projectile/Initialize()
 	. = ..()
@@ -139,16 +170,30 @@
 	decayedRange = range
 	pixels_per_second *= CONFIG_GET(number/projectile_speed_modifier) //Skyrat changes
 
+/obj/item/projectile/ComponentInitialize()
+	. = ..()
+	if(embedding)
+		updateEmbedding()
+
 /**
   * Artificially modified to be called at around every world.icon_size pixels of movement.
   * WARNING: Range() can only be called once per pixel_increment_amount pixels.
   */
 /obj/item/projectile/proc/Range()
 	range--
+	if(wound_bonus != CANT_WOUND)
+		wound_bonus += wound_falloff_tile
+		bare_wound_bonus = max(0, bare_wound_bonus + wound_falloff_tile)
+	if(embedding)
+		embedding["embed_chance"] += embed_falloff_tile
 	if(range <= 0 && loc)
+		//skyrat edit
+		SEND_SIGNAL(src, COMSIG_PROJECTILE_RANGE_OUT)
+		//
 		on_range()
 
 /obj/item/projectile/proc/on_range() //if we want there to be effects when they reach the end of their range
+	SEND_SIGNAL(src, COMSIG_PROJECTILE_RANGE_OUT)
 	qdel(src)
 
 //to get the correct limb (if any) for the projectile hit message
@@ -165,17 +210,16 @@
 /obj/item/projectile/proc/prehit(atom/target)
 	return TRUE
 
-/**
-  * Called when we hit something.
-  *
-  * @params
-  * * target - what we hit
-  * * blocked - 0 to 100 percentage mitigation/block
-  * * def zone - where we hit if we hit a mob.
-  */
-/obj/item/projectile/proc/on_hit(atom/target, blocked = 0, def_zone)
+/obj/item/projectile/proc/on_hit(atom/target, blocked = FALSE)
 	if(fired_from)
 		SEND_SIGNAL(fired_from, COMSIG_PROJECTILE_ON_HIT, firer, target, Angle)
+	// i know that this is probably more with wands and gun mods in mind, but it's a bit silly that the projectile on_hit signal doesn't ping the projectile itself.
+	// maybe we care what the projectile thinks! See about combining these via args some time when it's not 5AM
+	var/obj/item/bodypart/hit_limb
+	if(isliving(target))
+		var/mob/living/L = target
+		hit_limb = L.check_limb_hit(def_zone)
+	SEND_SIGNAL(src, COMSIG_PROJECTILE_SELF_ON_HIT, firer, target, Angle, hit_limb)
 	var/turf/target_loca = get_turf(target)
 
 	var/hitx
@@ -218,19 +262,22 @@
 			else
 				if(ishuman(target))
 					var/mob/living/carbon/human/H = target
-					new /obj/effect/temp_visual/dir_setting/bloodsplatter(target_loca, splatter_dir, H.dna.species.exotic_blood_color)
+					new /obj/effect/temp_visual/dir_setting/bloodsplatter(target_loca, splatter_dir, H.blood_DNA_to_color(), H.get_blood_dna_list())
 				else
-					new /obj/effect/temp_visual/dir_setting/bloodsplatter(target_loca, splatter_dir, bloodtype_to_color())
+					new /obj/effect/temp_visual/dir_setting/bloodsplatter(target_loca, splatter_dir, BLOOD_COLOR_HUMAN, L.get_blood_dna_list())
 
 				L.add_splatter_floor(target_loca)
 		else if(impact_effect_type && !hitscan)
 			new impact_effect_type(target_loca, hitx, hity)
 
 		var/organ_hit_text = ""
-		var/limb_hit = L.check_limb_hit(def_zone)//to get the correct message info.
+		var/limb_hit = hit_limb
 		if(limb_hit)
 			organ_hit_text = " in \the [parse_zone(limb_hit)]"
-		if(suppressed)
+
+		if(suppressed==SUPPRESSED_VERY)
+			playsound(loc, hitsound, 5, TRUE, -1)
+		else if(suppressed)
 			playsound(loc, hitsound, 5, 1, -1)
 			to_chat(L, "<span class='userdanger'>You're shot by \a [src][organ_hit_text]!</span>")
 		else
@@ -260,54 +307,48 @@
 	else
 		return 50 //if the projectile doesn't do damage, play its hitsound at 50% volume
 
+/obj/item/projectile/proc/on_ricochet(atom/A)
+	if(!ricochet_auto_aim_angle || !ricochet_auto_aim_range)
+		return
+
+	var/mob/living/unlucky_sob
+	var/best_angle = ricochet_auto_aim_angle
+	if(firer && HAS_TRAIT(firer, TRAIT_NICE_SHOT))
+		best_angle += NICE_SHOT_RICOCHET_BONUS
+	for(var/mob/living/L in range(ricochet_auto_aim_range, src.loc))
+		if(L.stat == DEAD || !isInSight(src, L))
+			continue
+		var/our_angle = abs(closer_angle_difference(Angle, get_projectile_angle(src.loc, L.loc)))
+		if(our_angle < best_angle)
+			best_angle = our_angle
+			unlucky_sob = L
+
+	if(unlucky_sob)
+		setAngle(get_projectile_angle(src, unlucky_sob.loc))
+
 /obj/item/projectile/proc/store_hitscan_collision(datum/point/pcache)
 	beam_segments[beam_index] = pcache
 	beam_index = pcache
 	beam_segments[beam_index] = null
-
-/**
-  * Determines if we should ricochet off of something.
-  * By default, asks the thing if we should ricochet off it, but because we're called first, we get final say.
-  * Returns TRUE or FALSE.
-  */
-/obj/item/projectile/proc/check_ricochet(atom/A)
-	if(ricochets > ricochets_max)		//safety thing, we don't care about what the other thing says about this.
-		return FALSE
-	var/them = A.check_projectile_ricochet(src)
-	switch(them)
-		if(PROJECTILE_RICOCHET_PREVENT)
-			return FALSE
-		if(PROJECTILE_RICOCHET_FORCE)
-			return TRUE
-		if(PROJECTILE_RICOCHET_NO)
-			return FALSE
-		if(PROJECTILE_RICOCHET_YES)
-			return prob(ricochet_chance)
-		else
-			CRASH("Invalid return value for projectile ricochet check from [A].")
-
-/**
-  * Handles ricocheting off of something.
-  * By default, also asks the thing to handle it, but because we're called first, we get final say.
-  */
-/obj/item/projectile/proc/handle_ricochet(atom/A)
-	ricochets++
-	ignore_source_check = TRUE
-	decayedRange = max(0, decayedRange - reflect_range_decrease)
-	pixel_move_interrupted = TRUE
-	range = decayedRange
-	return A.handle_projectile_ricochet(src)
-
 /obj/item/projectile/Bump(atom/A)
 	if(!trajectory)
 		return
 	var/turf/T = get_turf(A)
-	if(check_ricochet(A))
+	if(ricochets < ricochets_max && check_ricochet_flag(A) && check_ricochet(A)) //more like cryrat edit because this is making me cry
 		var/datum/point/pcache = trajectory.copy_to()
-		if(hitscan)
-			store_hitscan_collision(pcache)
-		handle_ricochet(A)
-		return TRUE
+		ricochets++
+		if(A.handle_ricochet(src))
+			on_ricochet(A)
+			ignore_source_check = TRUE
+			decayedRange = max(0, decayedRange - reflect_range_decrease)
+			//skyurethra edit
+			ricochet_chance *= ricochet_decay_chance
+			damage *= ricochet_decay_damage
+			//
+			range = decayedRange
+			if(hitscan)
+				store_hitscan_collision(pcache)
+			return TRUE
 
 	var/distance = get_dist(T, starting) // Get the distance between the turf shot from and the mob we hit and use that for the calculations.
 	if(def_zone && check_zone(def_zone) != BODY_ZONE_CHEST)
@@ -382,6 +423,28 @@
 		return T
 	//Returns null if nothing at all was found.
 
+/obj/item/projectile/proc/check_ricochet(atom/A) //skyrat edit
+	//skyrat edit
+	var/chance = ricochet_chance * A.ricochet_chance_mod
+	if(firer && HAS_TRAIT(firer, TRAIT_NICE_SHOT))
+		chance += NICE_SHOT_RICOCHET_BONUS
+	if(prob(chance))
+	//
+		return TRUE
+	return FALSE
+
+/obj/item/projectile/proc/check_ricochet_flag(atom/A)
+	//skyrat edit
+	if((flag in list("energy", "laser")) && (A.flags_ricochet & RICOCHET_SHINY))
+	//
+		return TRUE
+	
+	//skyrat edit another one lol
+	if((flag in list("bomb", "bullet")) && (A.flags_ricochet & RICOCHET_HARD))
+		return TRUE
+	//
+	return FALSE
+
 /// one move is a tile.
 /obj/item/projectile/proc/return_predicted_turf_after_moves(moves, forced_angle)		//I say predicted because there's no telling that the projectile won't change direction/location in flight.
 	if(!trajectory && isnull(forced_angle) && isnull(Angle))
@@ -419,6 +482,8 @@
 /obj/item/projectile/proc/fire(angle, atom/direct_target)
 	if(fired_from)
 		SEND_SIGNAL(fired_from, COMSIG_PROJECTILE_BEFORE_FIRE, src, original)	//If no angle needs to resolve it from xo/yo!
+	if(shrapnel_type)
+		AddElement(/datum/element/embed, projectile_payload = shrapnel_type)
 	if(!log_override && firer && original)
 		log_combat(firer, original, "fired at", src, "from [get_area_name(src, TRUE)]")
 	if(direct_target)
@@ -576,7 +641,7 @@
 				pixel_x = trajectory.return_px()
 				pixel_y = trajectory.return_py()
 		else if(T != loc)
-			var/safety = CEILING(pixel_increment_amount / world.icon_size, 1) * 2 + 1
+			var/safety = CEILING(pixel_increment_amount / world.icon_size, 1) * 5 + 1
 			while(T != loc)
 				if(!--safety)
 					CRASH("[type] took too long (allowed: [CEILING(pixel_increment_amount/world.icon_size,1)*2] moves) to get to its location.")
@@ -635,7 +700,13 @@
 	else
 		var/mob/living/L = target
 		if(!direct_target && !L.density)
-			return FALSE
+			//skyrat edit bing bing wahoo
+			var/checking = NONE
+			if(!hit_stunned_targets)
+				checking = MOBILITY_USE | MOBILITY_MOVE | MOBILITY_STAND
+			if(!((L.mobility_flags & checking) == checking) || !(L.stat == CONSCIOUS))		//If they're able to 1. stand or 2. use items or 3. move, AND they are not softcrit,  they are not stunned enough to dodge projectiles passing over.
+				return FALSE
+			//
 	return TRUE
 
 //Spread is FORCED!
@@ -694,7 +765,7 @@
 
 		var/ox = round(screenviewX/2) - user.client.pixel_x //"origin" x
 		var/oy = round(screenviewY/2) - user.client.pixel_y //"origin" y
-		angle = ATAN2(y - oy, x - ox) // Skyrat edit -- 512 compatibility
+		angle = arctan(y - oy, x - ox)
 	return list(angle, p_x, p_y)
 
 /obj/item/projectile/Crossed(atom/movable/AM) //A mob moving on a tile with a projectile is hit by it.
@@ -767,6 +838,26 @@
 
 /obj/item/projectile/experience_pressure_difference()
 	return
+
+///Like [/obj/item/proc/updateEmbedding] but for projectiles instead, call this when you want to add embedding or update the stats on the embedding element
+/obj/item/projectile/updateEmbedding()
+	if(!shrapnel_type || !islist(embedding) || !LAZYLEN(embedding))
+		return
+
+	AddElement(/datum/element/embed,\
+		embed_chance = (!isnull(embedding["embed_chance"]) ? embedding["embed_chance"] : EMBED_CHANCE),\
+		fall_chance = (!isnull(embedding["fall_chance"]) ? embedding["fall_chance"] : EMBEDDED_ITEM_FALLOUT),\
+		pain_chance = (!isnull(embedding["pain_chance"]) ? embedding["pain_chance"] : EMBEDDED_PAIN_CHANCE),\
+		pain_mult = (!isnull(embedding["pain_mult"]) ? embedding["pain_mult"] : EMBEDDED_PAIN_MULTIPLIER),\
+		remove_pain_mult = (!isnull(embedding["remove_pain_mult"]) ? embedding["remove_pain_mult"] : EMBEDDED_UNSAFE_REMOVAL_PAIN_MULTIPLIER),\
+		rip_time = (!isnull(embedding["rip_time"]) ? embedding["rip_time"] : EMBEDDED_UNSAFE_REMOVAL_TIME),\
+		ignore_throwspeed_threshold = (!isnull(embedding["ignore_throwspeed_threshold"]) ? embedding["ignore_throwspeed_threshold"] : FALSE),\
+		impact_pain_mult = (!isnull(embedding["impact_pain_mult"]) ? embedding["impact_pain_mult"] : EMBEDDED_IMPACT_PAIN_MULTIPLIER),\
+		jostle_chance = (!isnull(embedding["jostle_chance"]) ? embedding["jostle_chance"] : EMBEDDED_JOSTLE_CHANCE),\
+		jostle_pain_mult = (!isnull(embedding["jostle_pain_mult"]) ? embedding["jostle_pain_mult"] : EMBEDDED_JOSTLE_PAIN_MULTIPLIER),\
+		pain_stam_pct = (!isnull(embedding["pain_stam_pct"]) ? embedding["pain_stam_pct"] : EMBEDDED_PAIN_STAM_PCT),\
+		projectile_payload = shrapnel_type)
+	return TRUE
 
 /////// MISC HELPERS ////////
 /// Is this atom reflectable with ""standardized"" reflection methods like you know eshields and deswords and similar
